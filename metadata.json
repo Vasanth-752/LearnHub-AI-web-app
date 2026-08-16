@@ -1,0 +1,6 @@
+{
+  "name": "LearnHub AI",
+  "description": "Deep Work Learning & Research Platform with AI Roadmaps, Notes Synthesis, and Progress Tracking",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
