@@ -14,14 +14,11 @@ import {
   ArrowRight,
   AlertCircle,
   CheckCircle2,
-  Zap,
+  Database,
 } from 'lucide-react';
 import { ThemeMode, UserProfile } from '../types';
-import {
-  signInWithGoogle,
-  loginWithEmail,
-  registerWithEmail,
-} from '../lib/firebase';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { supabaseService } from '../lib/supabaseService';
 
 interface AuthViewProps {
   theme: ThemeMode;
@@ -53,48 +50,65 @@ export const AuthView: React.FC<AuthViewProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
 
-  // Google OAuth Handler
+  // Check for OAuth error in URL hash / query on mount
+  React.useEffect(() => {
+    const hash = window.location.hash;
+    const search = window.location.search;
+    const urlParams = new URLSearchParams(search || hash.replace('#', '?'));
+    const errorDescription = urlParams.get('error_description');
+    const errorCode = urlParams.get('error');
+    if (errorDescription || errorCode) {
+      setErrorMessage(
+        decodeURIComponent(errorDescription || errorCode || 'OAuth provider authentication failed.')
+      );
+      // Clean up the URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
+  // Google OAuth Handler with Supabase
   const handleGoogleSignIn = async () => {
     setErrorMessage(null);
     setSuccessNotice(null);
     setIsGoogleLoading(true);
 
     try {
-      const user = await signInWithGoogle();
-      const name = user.displayName || user.email?.split('@')[0] || 'Scholar';
-      const userEmail = user.email || 'user@example.com';
-      const avatarUrl =
-        user.photoURL ||
-        `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`;
+      if (isSupabaseConfigured && supabase) {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: window.location.origin,
+          },
+        });
+        if (error) throw error;
+        return;
+      }
 
-      setSuccessNotice(`Authenticated as ${name}`);
+      // Local fallback mode
+      const defaultName = 'Scholar Researcher';
+      const defaultEmail = 'researcher@learnhub.ai';
+      const defaultAvatar = `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`;
+
+      setSuccessNotice(`Authenticated as ${defaultName}`);
       setTimeout(() => {
         onSuccess({
-          name,
-          email: userEmail,
-          avatarUrl,
+          name: defaultName,
+          email: defaultEmail,
+          avatarUrl: defaultAvatar,
           authProvider: 'google',
           isLoggedIn: true,
-          uid: user.uid,
+          uid: 'local-scholar-' + Date.now(),
         });
       }, 500);
     } catch (err: any) {
       console.error('Google Auth Error:', err);
-      if (err.code === 'auth/popup-closed-by-user') {
-        setErrorMessage('Sign-in window was closed. Please try again.');
-      } else if (err.code === 'auth/cancelled-popup-request') {
-        setErrorMessage('Sign-in request was cancelled.');
-      } else if (err.code === 'auth/popup-blocked') {
-        setErrorMessage('Pop-up was blocked by browser. Please allow popups for this site.');
-      } else {
-        setErrorMessage(err.message || 'Failed to authenticate with Google.');
-      }
+      setErrorMessage(err.message || 'Failed to authenticate with Google.');
     } finally {
       setIsGoogleLoading(false);
     }
   };
 
-  // Email / Password Handler
+  // Email / Password Handler with Supabase
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -118,50 +132,107 @@ export const AuthView: React.FC<AuthViewProps> = ({
     setIsLoading(true);
 
     try {
-      if (mode === 'register') {
-        const user = await registerWithEmail(fullName, email, password);
-        const name = fullName.trim() || user.displayName || email.split('@')[0];
-        setSuccessNotice('Account successfully created! Logging in...');
-        setTimeout(() => {
-          onSuccess({
-            name,
-            email: user.email || email,
-            avatarUrl:
-              user.photoURL ||
-              `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`,
-            authProvider: 'email',
-            isLoggedIn: true,
-            uid: user.uid,
+      if (isSupabaseConfigured && supabase) {
+        if (mode === 'register') {
+          const { data, error } = await supabase.auth.signUp({
+            email: email.trim(),
+            password,
+            options: {
+              data: {
+                name: fullName.trim(),
+              },
+            },
           });
-        }, 500);
+
+          if (error) throw error;
+
+          const user = data.user;
+          const name = fullName.trim();
+          const avatarUrl = `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`;
+
+          if (user) {
+            await supabaseService.upsertProfile(user.id, {
+              name,
+              email: user.email || email.trim(),
+              avatarUrl,
+              theme,
+            });
+          }
+
+          setSuccessNotice('Account successfully created! Entering workspace...');
+          setTimeout(() => {
+            onSuccess({
+              name,
+              email: user?.email || email.trim(),
+              avatarUrl,
+              authProvider: 'email',
+              isLoggedIn: true,
+              uid: user?.id || 'usr-' + Date.now(),
+            });
+          }, 600);
+        } else {
+          const { data, error } = await supabase.auth.signInWithPassword({
+            email: email.trim(),
+            password,
+          });
+
+          if (error) throw error;
+
+          const user = data.user;
+          let remoteProfile: Partial<UserProfile> | null = null;
+          if (user) {
+            remoteProfile = await supabaseService.getProfile(user.id);
+          }
+
+          const name =
+            remoteProfile?.name ||
+            user?.user_metadata?.name ||
+            email.split('@')[0] ||
+            'Scholar';
+
+          setSuccessNotice(`Welcome back, ${name}!`);
+          setTimeout(() => {
+            onSuccess({
+              name,
+              email: user?.email || email.trim(),
+              avatarUrl:
+                remoteProfile?.avatarUrl ||
+                `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`,
+              authProvider: 'email',
+              isLoggedIn: true,
+              uid: user?.id || 'usr-' + Date.now(),
+              ...(remoteProfile && remoteProfile),
+            });
+          }, 600);
+        }
       } else {
-        const user = await loginWithEmail(email, password);
-        const name = user.displayName || email.split('@')[0];
-        setSuccessNotice(`Welcome back, ${name}!`);
+        // Fallback local mode
+        const name =
+          mode === 'register'
+            ? fullName.trim()
+            : email.split('@')[0] || 'Scholar';
+        const avatarUrl = `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`;
+
+        setSuccessNotice(
+          mode === 'register'
+            ? 'Account created! Entering workspace...'
+            : `Welcome back, ${name}!`
+        );
+
         setTimeout(() => {
           onSuccess({
             name,
-            email: user.email || email,
-            avatarUrl:
-              user.photoURL ||
-              `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`,
+            email: email.trim(),
+            avatarUrl,
             authProvider: 'email',
             isLoggedIn: true,
-            uid: user.uid,
+            uid: 'local-user-' + Date.now(),
           });
         }, 500);
       }
     } catch (err: any) {
       console.error('Email Auth Error:', err);
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
-        setErrorMessage('Invalid email or password credentials.');
-      } else if (err.code === 'auth/email-already-in-use') {
-        setErrorMessage('An account with this email already exists. Try signing in.');
-      } else if (err.code === 'auth/invalid-email') {
-        setErrorMessage('Please enter a valid email address.');
-      } else {
-        setErrorMessage(err.message || 'Authentication failed. Please verify credentials.');
-      }
+      setErrorMessage(err.message || 'Authentication failed. Please verify credentials.');
     } finally {
       setIsLoading(false);
     }
@@ -293,10 +364,10 @@ export const AuthView: React.FC<AuthViewProps> = ({
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-[#0F172A] dark:text-[#F8FAFC]">
-                    Encrypted & Private
+                    Encrypted with PostgreSQL RLS
                   </h4>
                   <p className="text-[11px] text-[#475569] dark:text-[#94A3B8] mt-0.5">
-                    Your research notes and personal roadmaps remain strictly yours.
+                    Your research notes and personal roadmaps remain private and secure.
                   </p>
                 </div>
               </div>
@@ -558,9 +629,7 @@ export const AuthView: React.FC<AuthViewProps> = ({
 
               {/* Footer Terms */}
               <p className="text-[10px] text-center text-[#64748B] dark:text-[#94A3B8] mt-6">
-                Protected by Google OAuth 2.0. By signing in, you agree to our{' '}
-                <span className="underline cursor-pointer">Terms of Service</span> &{' '}
-                <span className="underline cursor-pointer">Privacy Policy</span>.
+                Protected by Supabase Auth & PostgreSQL RLS.
               </p>
             </div>
           </div>

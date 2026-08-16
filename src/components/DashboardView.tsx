@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Clock, Flame, ChevronRight, MessageSquare, Plus, ArrowRight, CheckSquare, Square, Zap, Award } from 'lucide-react';
-import { ActiveSprint, SprintTask, ThemeMode, NavigationTab } from '../types';
+import { ActiveSprint, SprintTask, ThemeMode, NavigationTab, UserProfile, Roadmap } from '../types';
 import confetti from 'canvas-confetti';
+import { WeeklyAnalyticsSummary } from './WeeklyAnalyticsSummary';
 
 interface DashboardViewProps {
   sprint: ActiveSprint;
@@ -12,6 +13,8 @@ interface DashboardViewProps {
   theme: ThemeMode;
   isDeepWorkActive: boolean;
   userName?: string;
+  profile?: UserProfile;
+  roadmaps?: Roadmap[];
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -23,6 +26,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   theme,
   isDeepWorkActive,
   userName = 'Alex',
+  profile,
+  roadmaps = [],
 }) => {
   const isAbyssal = theme === 'abyssal';
   const [selectedModule, setSelectedModule] = useState(sprint.moduleName);
@@ -357,6 +362,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Weekly Progress & Deep Work Analytics Summary Card */}
+      <WeeklyAnalyticsSummary
+        theme={theme}
+        profile={
+          profile || {
+            name: userName,
+            email: 'alex@learnhub.ai',
+            avatarUrl: '',
+            roadmapsCompleted: 3,
+            dayStreak: 5,
+            notesSynthesized: 14,
+            theme,
+            exportFormat: 'PDF Document',
+          }
+        }
+        roadmaps={roadmaps}
+      />
     </div>
   );
 };

@@ -11,8 +11,10 @@ import { LandingView } from './components/LandingView';
 import { AuthView } from './components/AuthView';
 import { NewResearchModal } from './components/NewResearchModal';
 import { DeepWorkTimerModal } from './components/DeepWorkTimerModal';
-import { auth, logoutFirebase } from './lib/firebase';
-import { onAuthStateChanged } from 'firebase/auth';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { SupabaseDiagnosticsToast } from './components/SupabaseDiagnosticsToast';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
+import { supabaseService } from './lib/supabaseService';
 
 import {
   initialProfile,
@@ -32,8 +34,22 @@ import {
 } from './types';
 
 export default function App() {
-  // Navigation & View State (Always starts from the landing page)
-  const [currentTab, setCurrentTab] = useState<NavigationTab>('landing');
+  // Navigation & View State (Check if returning from OAuth redirect on initial load)
+  const [currentTab, setCurrentTab] = useState<NavigationTab>(() => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash;
+      const search = window.location.search;
+      if (
+        hash.includes('access_token=') ||
+        hash.includes('type=recovery') ||
+        hash.includes('type=invite') ||
+        search.includes('code=')
+      ) {
+        return 'dashboard';
+      }
+    }
+    return 'landing';
+  });
 
   // Application Data States
   const [profile, setProfile] = useState<UserProfile>(() => {
@@ -80,30 +96,135 @@ export default function App() {
     }
   }, [profile]);
 
-  // Firebase Auth State Listener
+  // Supabase Auth State Listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      if (firebaseUser) {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    // Check active session on startup
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        const user = session.user;
+        const name = user.user_metadata?.name || user.email?.split('@')[0] || 'Scholar';
         setProfile((prev) => ({
           ...prev,
-          name: firebaseUser.displayName || prev.name,
-          email: firebaseUser.email || prev.email,
-          avatarUrl:
-            firebaseUser.photoURL ||
-            prev.avatarUrl ||
-            `https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80`,
-          authProvider: 'google',
+          name: prev.name || name,
+          email: user.email || prev.email,
+          authProvider: user.app_metadata?.provider === 'google' ? 'google' : 'email',
           isLoggedIn: true,
-          uid: firebaseUser.uid,
+          uid: user.id,
         }));
       }
     });
-    return () => unsubscribe();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (session?.user) {
+          const user = session.user;
+          const remoteProfile = await supabaseService.getProfile(user.id);
+          const name = remoteProfile?.name || user.user_metadata?.name || user.email?.split('@')[0] || 'Scholar';
+          
+          setProfile((prev) => ({
+            ...prev,
+            name,
+            email: user.email || prev.email,
+            avatarUrl: remoteProfile?.avatarUrl || user.user_metadata?.avatar_url || prev.avatarUrl,
+            theme: remoteProfile?.theme || prev.theme,
+            exportFormat: remoteProfile?.exportFormat || prev.exportFormat,
+            roadmapsCompleted: remoteProfile?.roadmapsCompleted ?? prev.roadmapsCompleted,
+            dayStreak: remoteProfile?.dayStreak ?? prev.dayStreak,
+            notesSynthesized: remoteProfile?.notesSynthesized ?? prev.notesSynthesized,
+            authProvider: user.app_metadata?.provider === 'google' ? 'google' : 'email',
+            isLoggedIn: true,
+            uid: user.id,
+          }));
+
+          // If returning from OAuth redirect, route user straight to dashboard
+          if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+            if (window.location.hash.includes('access_token') || window.location.search.includes('code=')) {
+              setCurrentTab('dashboard');
+              // Clean up the URL hash/search without full page reload
+              window.history.replaceState({}, document.title, window.location.pathname);
+            }
+          }
+
+          // Fetch cloud roadmaps, notes, and sprint
+          const [cloudRoadmaps, cloudNotes, cloudSprint] = await Promise.all([
+            supabaseService.getRoadmaps(user.id),
+            supabaseService.getNotes(user.id),
+            supabaseService.getSprint(user.id),
+          ]);
+
+          if (cloudRoadmaps && cloudRoadmaps.length > 0) setRoadmaps(cloudRoadmaps);
+          if (cloudNotes && cloudNotes.length > 0) setNotes(cloudNotes);
+          if (cloudSprint) setSprint(cloudSprint);
+        } else if (event === 'SIGNED_OUT') {
+          setProfile((prev) => ({
+            ...prev,
+            isLoggedIn: false,
+            uid: undefined,
+            authProvider: undefined,
+          }));
+        }
+      }
+    );
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
     localStorage.setItem('learnhub_sprint', JSON.stringify(sprint));
-  }, [sprint]);
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.saveSprint(profile.uid, sprint);
+    }
+  }, [sprint, profile.uid]);
+
+  // Supabase Realtime Sync Listener across sessions / tabs / devices
+  useEffect(() => {
+    if (!profile.uid || !supabaseService.isReady()) return;
+
+    const unsubscribeRealtime = supabaseService.subscribeToUserData(profile.uid, {
+      onProfileUpdate: (updatedProfile) => {
+        setProfile((prev) => ({ ...prev, ...updatedProfile }));
+      },
+      onRoadmapUpsert: (updatedRoadmap) => {
+        setRoadmaps((prev) => {
+          const index = prev.findIndex((r) => r.id === updatedRoadmap.id);
+          if (index >= 0) {
+            const next = [...prev];
+            next[index] = updatedRoadmap;
+            return next;
+          }
+          return [updatedRoadmap, ...prev];
+        });
+      },
+      onRoadmapDelete: (roadmapId) => {
+        setRoadmaps((prev) => prev.filter((r) => r.id !== roadmapId));
+      },
+      onNoteUpsert: (updatedNote) => {
+        setNotes((prev) => {
+          const index = prev.findIndex((n) => n.id === updatedNote.id);
+          if (index >= 0) {
+            const next = [...prev];
+            next[index] = updatedNote;
+            return next;
+          }
+          return [updatedNote, ...prev];
+        });
+      },
+      onNoteDelete: (noteId) => {
+        setNotes((prev) => prev.filter((n) => n.id !== noteId));
+      },
+      onSprintUpdate: (updatedSprint) => {
+        setSprint(updatedSprint);
+      },
+    });
+
+    return () => {
+      unsubscribeRealtime();
+    };
+  }, [profile.uid]);
 
   useEffect(() => {
     localStorage.setItem('learnhub_roadmaps', JSON.stringify(roadmaps));
@@ -122,23 +243,48 @@ export default function App() {
     setNotes((prev) =>
       prev.map((n) => (n.id === updatedNote.id ? updatedNote : n))
     );
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.saveNote(profile.uid, updatedNote);
+    }
   };
 
   const handleCreateNote = (newNote: NoteItem) => {
     setNotes((prev) => [newNote, ...prev]);
-    setProfile((p) => ({ ...p, notesSynthesized: p.notesSynthesized + 1 }));
+    setProfile((p) => {
+      const updated = { ...p, notesSynthesized: p.notesSynthesized + 1 };
+      if (p.uid && supabaseService.isReady()) {
+        supabaseService.upsertProfile(p.uid, { notesSynthesized: updated.notesSynthesized });
+      }
+      return updated;
+    });
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.saveNote(profile.uid, newNote);
+    }
+  };
+
+  const handleDeleteNote = (noteId: string) => {
+    setNotes((prev) => prev.filter((n) => n.id !== noteId));
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.deleteNote(profile.uid, noteId);
+    }
   };
 
   const handleCreateRoadmap = (newRoadmap: Roadmap) => {
     setRoadmaps((prev) => [newRoadmap, ...prev]);
     setActiveRoadmapId(newRoadmap.id);
     setCurrentTab('roadmaps');
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.saveRoadmap(profile.uid, newRoadmap);
+    }
   };
 
   const handleUpdateRoadmap = (updated: Roadmap) => {
     setRoadmaps((prev) =>
       prev.map((r) => (r.id === updated.id ? updated : r))
     );
+    if (profile.uid && supabaseService.isReady()) {
+      supabaseService.saveRoadmap(profile.uid, updated);
+    }
   };
 
   const handleSendMessage = async (text: string) => {
@@ -304,10 +450,12 @@ export default function App() {
 
   // Centralized Sign Out Handler
   const handleSignOut = async () => {
-    try {
-      await logoutFirebase();
-    } catch (e) {
-      console.error('Firebase signout error:', e);
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch (e) {
+        console.error('Supabase signout error:', e);
+      }
     }
     setProfile((prev) => {
       const updated: UserProfile = {
@@ -446,86 +594,94 @@ export default function App() {
           onToggleDeepWork={() => setIsDeepWorkTimerOpen(true)}
         />
 
-        {/* Dynamic Tab Body with Smooth Fade-in View Transition */}
+        {/* Dynamic Tab Body with Smooth Fade-in View Transition & Error Boundary */}
         <main className="flex-1 overflow-y-auto relative">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={currentTab}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.18, ease: 'easeOut' }}
-              className="min-h-full"
-            >
-              {currentTab === 'dashboard' && (
-                <DashboardView
-                  sprint={sprint}
-                  onUpdateSprint={setSprint}
-                  onNavigate={(tab) => setCurrentTab(tab)}
-                  onOpenChat={(topicTitle) => {
-                    if (topicTitle) {
-                      const matchingConv = conversations.find((c) =>
-                        c.title.toLowerCase().includes(topicTitle.toLowerCase())
-                      );
-                      if (matchingConv) {
-                        setActiveConversationId(matchingConv.id);
+          <ErrorBoundary
+            fallbackTitle="Something went wrong while rendering this view"
+            onReset={() => setCurrentTab('dashboard')}
+          >
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={currentTab}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className="min-h-full"
+              >
+                {currentTab === 'dashboard' && (
+                  <DashboardView
+                    sprint={sprint}
+                    onUpdateSprint={setSprint}
+                    onNavigate={(tab) => setCurrentTab(tab)}
+                    onOpenChat={(topicTitle) => {
+                      if (topicTitle) {
+                        const matchingConv = conversations.find((c) =>
+                          c.title.toLowerCase().includes(topicTitle.toLowerCase())
+                        );
+                        if (matchingConv) {
+                          setActiveConversationId(matchingConv.id);
+                        }
                       }
-                    }
-                    setCurrentTab('chat');
-                  }}
-                  onOpenNewResearch={() => setIsNewResearchOpen(true)}
-                  theme={profile.theme}
-                  isDeepWorkActive={isDeepWorkActive}
-                  userName={profile.name.split(' ')[0]}
-                />
-              )}
+                      setCurrentTab('chat');
+                    }}
+                    onOpenNewResearch={() => setIsNewResearchOpen(true)}
+                    theme={profile.theme}
+                    isDeepWorkActive={isDeepWorkActive}
+                    userName={profile.name.split(' ')[0]}
+                    profile={profile}
+                    roadmaps={roadmaps}
+                  />
+                )}
 
-              {currentTab === 'chat' && (
-                <AiChatView
-                  conversations={conversations}
-                  activeConversationId={activeConversationId}
-                  onSelectConversation={setActiveConversationId}
-                  onNewConversation={handleNewConversation}
-                  onSendMessage={handleSendMessage}
-                  onNavigateToRoadmap={(id) => {
-                    if (id) setActiveRoadmapId(id);
-                    setCurrentTab('roadmaps');
-                  }}
-                  theme={profile.theme}
-                />
-              )}
+                {currentTab === 'chat' && (
+                  <AiChatView
+                    conversations={conversations}
+                    activeConversationId={activeConversationId}
+                    onSelectConversation={setActiveConversationId}
+                    onNewConversation={handleNewConversation}
+                    onSendMessage={handleSendMessage}
+                    onNavigateToRoadmap={(id) => {
+                      if (id) setActiveRoadmapId(id);
+                      setCurrentTab('roadmaps');
+                    }}
+                    theme={profile.theme}
+                  />
+                )}
 
-              {currentTab === 'roadmaps' && (
-                <RoadmapsView
-                  roadmaps={roadmaps}
-                  activeRoadmapId={activeRoadmapId}
-                  onSelectRoadmap={setActiveRoadmapId}
-                  onUpdateRoadmap={handleUpdateRoadmap}
-                  onNavigateToTopic={handleNavigateToTopic}
-                  onRegenerateInChat={handleRegenerateRoadmapInChat}
-                  onOpenNewResearch={() => setIsNewResearchOpen(true)}
-                  theme={profile.theme}
-                />
-              )}
+                {currentTab === 'roadmaps' && (
+                  <RoadmapsView
+                    roadmaps={roadmaps}
+                    activeRoadmapId={activeRoadmapId}
+                    onSelectRoadmap={setActiveRoadmapId}
+                    onUpdateRoadmap={handleUpdateRoadmap}
+                    onNavigateToTopic={handleNavigateToTopic}
+                    onRegenerateInChat={handleRegenerateRoadmapInChat}
+                    onOpenNewResearch={() => setIsNewResearchOpen(true)}
+                    theme={profile.theme}
+                  />
+                )}
 
-              {currentTab === 'notes' && (
-                <NotesView
-                  notes={notes}
-                  onSaveNote={handleSaveNote}
-                  onCreateNote={handleCreateNote}
-                  theme={profile.theme}
-                />
-              )}
+                {currentTab === 'notes' && (
+                  <NotesView
+                    notes={notes}
+                    onSaveNote={handleSaveNote}
+                    onCreateNote={handleCreateNote}
+                    onDeleteNote={handleDeleteNote}
+                    theme={profile.theme}
+                  />
+                )}
 
-              {currentTab === 'settings' && (
-                <SettingsView
-                  profile={profile}
-                  onUpdateProfile={setProfile}
-                  onSignOut={handleSignOut}
-                />
-              )}
-            </motion.div>
-          </AnimatePresence>
+                {currentTab === 'settings' && (
+                  <SettingsView
+                    profile={profile}
+                    onUpdateProfile={setProfile}
+                    onSignOut={handleSignOut}
+                  />
+                )}
+              </motion.div>
+            </AnimatePresence>
+          </ErrorBoundary>
         </main>
       </div>
 
@@ -545,6 +701,9 @@ export default function App() {
         onToggleActive={() => setIsDeepWorkActive(!isDeepWorkActive)}
         theme={profile.theme}
       />
+
+      {/* Supabase Connectivity & Environment Diagnostic Notification */}
+      <SupabaseDiagnosticsToast />
     </div>
   );
 }

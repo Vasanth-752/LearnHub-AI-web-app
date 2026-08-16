@@ -205,8 +205,32 @@ export const NotesView: React.FC<NotesViewProps> = ({
           </button>
         </div>
 
-        {/* Right Actions: Save, PDF */}
-        <div className="flex items-center gap-3">
+        {/* Right Actions: Save, PDF, Delete */}
+        <div className="flex items-center gap-2.5">
+          {onDeleteNote && notes.length > 1 && (
+            <button
+              id="btn-delete-note"
+              onClick={() => {
+                if (confirm(`Delete note "${activeNote.title}"?`)) {
+                  onDeleteNote(activeNote.id);
+                  const remaining = notes.filter((n) => n.id !== activeNote.id);
+                  if (remaining.length > 0) {
+                    selectNote(remaining[0]);
+                  }
+                }
+              }}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+                isAbyssal
+                  ? 'border-rose-900/50 text-rose-400 hover:bg-rose-950/40'
+                  : 'border-rose-200 text-rose-700 hover:bg-rose-50'
+              }`}
+              title="Delete this note"
+            >
+              <Trash2 size={13} />
+              <span>Delete</span>
+            </button>
+          )}
+
           <button
             id="btn-save-note"
             onClick={handleSave}

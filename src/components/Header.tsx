@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Search, Bell, HelpCircle, User, Sparkles, CheckCircle2, Clock } from 'lucide-react';
+import { Search, Bell, HelpCircle, User, Sparkles, CheckCircle2, Clock, Cloud, CloudOff, RefreshCw, Database } from 'lucide-react';
 import { UserProfile, ThemeMode } from '../types';
+import { isSupabaseConfigured } from '../lib/supabase';
 
 interface HeaderProps {
   placeholder?: string;

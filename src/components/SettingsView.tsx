@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { User, Shield, Sliders, Sun, Moon, FileText, Check, LogOut, Flame, BookOpen, Layers } from 'lucide-react';
 import { UserProfile, ThemeMode } from '../types';
 import confetti from 'canvas-confetti';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { supabaseService } from '../lib/supabaseService';
 
 interface SettingsViewProps {
   profile: UserProfile;
@@ -27,9 +29,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setSaveToast(null), 3000);
   };
 
-  const handleUpdateName = (e: React.FormEvent) => {
+  const handleUpdateName = async (e: React.FormEvent) => {
     e.preventDefault();
     onUpdateProfile({ ...profile, name: displayName });
+    if (profile.uid && isSupabaseConfigured) {
+      await supabaseService.upsertProfile(profile.uid, { name: displayName });
+    }
     showFeedback('Public profile updated.');
   };
 
@@ -38,15 +43,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     showFeedback('Email preferences saved.');
   };
 
-  const handleUpdatePassword = (e: React.FormEvent) => {
+  const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentPassword || !newPassword) {
-      alert('Please fill out both password fields.');
+    if (!newPassword || newPassword.length < 6) {
+      alert('Please provide a new password of at least 6 characters.');
       return;
     }
-    setCurrentPassword('');
-    setNewPassword('');
-    showFeedback('Password successfully updated.');
+    try {
+      if (isSupabaseConfigured && supabase) {
+        const { error } = await supabase.auth.updateUser({ password: newPassword });
+        if (error) throw error;
+      }
+      setCurrentPassword('');
+      setNewPassword('');
+      showFeedback('Password successfully updated.');
+    } catch (err: any) {
+      showFeedback(err.message || 'Failed to update password.');
+    }
   };
 
   const handleSetTheme = (theme: ThemeMode) => {
@@ -427,7 +440,63 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* Section 4: Sign Out (Image 5) */}
+      {/* Section 4: Cloud Persistence & Database (Supabase) */}
+      <section className="space-y-4 pt-4 border-t border-[#EAE0CF] dark:border-[#1F2C3F]">
+        <div>
+          <h3 className="font-serif text-xl font-bold text-[#0F172A] dark:text-[#F8FAFC]">
+            Cloud Persistence
+          </h3>
+          <p className="text-xs text-[#475569] dark:text-[#CBD5E1] mt-0.5">
+            PostgreSQL & Auth synchronization powered by Supabase.
+          </p>
+        </div>
+
+        <div
+          className={`rounded-2xl border p-6 space-y-4 transition-colors ${
+            isAbyssal
+              ? 'bg-[#151F2E] border-[#253549]'
+              : 'bg-[#FFFDF9] border-[#E2D8C6]'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                isSupabaseConfigured
+                  ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                  : 'bg-[#FAF6EE] dark:bg-[#0E1520] text-[#64748B] dark:text-[#94A3B8] border border-[#DDD2C0] dark:border-[#293B52]'
+              }`}>
+                <Shield size={18} />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-[#0F172A] dark:text-[#F8FAFC]">
+                  {isSupabaseConfigured ? 'Supabase Connected' : 'Local-First Storage Active'}
+                </p>
+                <p className="text-[11px] text-[#475569] dark:text-[#94A3B8]">
+                  {isSupabaseConfigured
+                    ? 'Roadmaps, notes, and profile data automatically sync across devices.'
+                    : 'Changes are safely stored locally in your browser storage.'}
+                </p>
+              </div>
+            </div>
+
+            <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold border ${
+              isSupabaseConfigured
+                ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-900 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border-zinc-300 dark:border-zinc-700'
+            }`}>
+              {isSupabaseConfigured ? 'Live Cloud Sync' : 'Local Fallback'}
+            </span>
+          </div>
+
+          {profile.uid && (
+            <div className="pt-2 text-[11px] text-[#64748B] dark:text-[#94A3B8] font-mono break-all">
+              User UID: {profile.uid}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Section 5: Sign Out (Image 5) */}
       <section className="pt-4 border-t border-[#EAE0CF] dark:border-[#1F2C3F]">
         <div
           className={`rounded-2xl border p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-colors ${
